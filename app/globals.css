@@ -1,26 +1,189 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:is(.dark *));
+
+/* ─── Semantic color tokens ──────────────────────────────────────────────────── */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: oklch(0.1 0 0);
+  --foreground: oklch(0.95 0 0);
+  --card: oklch(0.15 0 0);
+  --card-foreground: oklch(0.95 0 0);
+  --popover: oklch(0.15 0 0);
+  --popover-foreground: oklch(0.95 0 0);
+  --primary: oklch(0.63 0.223 160);
+  --primary-foreground: oklch(0.1 0 0);
+  --secondary: oklch(0.5 0.15 260);
+  --secondary-foreground: oklch(0.95 0 0);
+  --muted: oklch(0.35 0 0);
+  --muted-foreground: oklch(0.65 0 0);
+  --accent: oklch(0.63 0.223 160);
+  --accent-foreground: oklch(0.1 0 0);
+  --destructive: oklch(0.6 0.22 25);
+  --destructive-foreground: oklch(0.95 0 0);
+  --border: oklch(0.25 0 0);
+  --input: oklch(0.2 0 0);
+  --ring: oklch(0.63 0.223 160);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.12 0 0);
+  --sidebar-foreground: oklch(0.95 0 0);
+  --sidebar-accent: oklch(0.25 0 0);
+  --sidebar-accent-foreground: oklch(0.95 0 0);
+  --sidebar-border: oklch(0.2 0 0);
+}
+
+@theme {
+  /* Named accent utilities: text-emerald, bg-emerald/10, etc. */
+  --color-emerald: oklch(0.63 0.223 160);
+  --color-blue-accent: oklch(0.55 0.18 250);
+  --color-orange-accent: oklch(0.65 0.22 40);
+  --color-purple-accent: oklch(0.7 0.15 280);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+  body {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* ─── Landing page font overrides ───────────────────────────────────────────── */
+/* Applied when Google Fonts are loaded by LandingPage via useEffect              */
+
+.font-mono { font-family: 'Geist Mono', ui-monospace, monospace; }
+.italic, .font-italic, em, i { font-family: 'Instrument Serif', Georgia, serif; font-style: italic; }
+
+/* ─── Scrollbar ─────────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: #141414; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+/* ─── Landing page animations ──────────────────────────────────────────────── */
+
+@keyframes lp-word-up {
+  from { transform: translateY(110%); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+@keyframes lp-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes lp-fade-up {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+
+@keyframes lp-orb-breathe {
+  0%, 100% { opacity: 0.55; transform: scale(1);    }
+  50%       { opacity: 0.75; transform: scale(1.08); }
+}
+
+@keyframes lp-draw {
+  from { stroke-dashoffset: 600; opacity: 0; }
+  to   { stroke-dashoffset: 0;   opacity: 1; }
+}
+
+@keyframes lp-dot-pulse {
+  0%, 100% { opacity: 1;   transform: scale(1);   }
+  50%       { opacity: 0.5; transform: scale(1.6); }
+}
+
+@keyframes lp-scan {
+  0%   { top: -2px; opacity: 0; }
+  5%   { opacity: 1; }
+  95%  { opacity: 1; }
+  100% { top: 100%;  opacity: 0; }
+}
+
+@keyframes lp-float {
+  0%, 100% { transform: translateY(0);    }
+  50%       { transform: translateY(-8px); }
+}
+
+/* ─── AI Visual animations ──────────────────────────────────────────────────── */
+
+@keyframes ai-ring {
+  0%   { transform: scale(0.08); opacity: 0.75; }
+  100% { transform: scale(7);    opacity: 0;    }
+}
+
+@keyframes ai-orb-glow {
+  0%, 100% {
+    box-shadow: 0 0 10px 3px rgba(16,185,129,0.55),
+                0 0 32px 8px rgba(16,185,129,0.12);
+  }
+  50% {
+    box-shadow: 0 0 18px 7px rgba(16,185,129,0.85),
+                0 0 60px 18px rgba(16,185,129,0.22);
+  }
+}
+
+@keyframes ai-spin-cw  { to { transform: rotate( 360deg); } }
+@keyframes ai-spin-ccw { to { transform: rotate(-360deg); } }
+
+@keyframes ai-particle {
+  0%, 100% { transform: translateY(0);          opacity: 0.45; }
+  50%       { transform: translateY(var(--fy));  opacity: 0.9;  }
+}
+
+/* Ghost skeleton — faint opacity breathing for the translucent overlay figure */
+@keyframes ghost-breathe {
+  0%, 100% { opacity: 1;    }
+  50%       { opacity: 0.55; }
+}
+
+/* Skeleton figure vertical breathe (used in GhostSection GhostStage) */
+@keyframes breathe {
+  0%, 100% { transform: translateY(0);    }
+  50%       { transform: translateY(-4px); }
+}
+
+/* Scroll-reveal */
+.lp-reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.9s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.9s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.lp-reveal.in-view {
+  opacity: 1;
+  transform: translateY(0);
 }
