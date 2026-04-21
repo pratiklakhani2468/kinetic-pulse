@@ -8,11 +8,17 @@ import {
   calculateAngle,
   detectCurlRep,
   detectSquatRep,
+  detectDualCurlRep,
+  detectDualSquatRep,
+  detectPushupRep,
   getAIFeedback,
   getSquatFeedback,
+  getDualCurlFeedback,
+  getPushupFeedback,
   LANDMARKS,
   type CurlStage,
   type SquatStage,
+  type PushupStage,
   type AIFeedback,
 } from "@/lib/poseUtils";
 import {
@@ -176,8 +182,16 @@ export default function PoseCamera({ session, feedback, exerciseId = "bicep-curl
   const poseRef   = useRef<any>(null);
 
   // Stage lives in refs — read inside the rAF loop without stale closures
-  const curlStageRef  = useRef<CurlStage>("DOWN");
-  const squatStageRef = useRef<SquatStage>("UP");
+  const curlStageRef   = useRef<CurlStage>("DOWN");
+  const squatStageRef  = useRef<SquatStage>("UP");
+  const pushupStageRef = useRef<PushupStage>("UP");
+
+  // Per-side angle smoothing buffers (bilateral exercises need two)
+  const leftAngleBufferRef  = useRef<number[]>([]);
+  const rightAngleBufferRef = useRef<number[]>([]);
+
+  // Phase-start timestamp — used for the ≥ 500 ms stability check
+  const phaseStartTimeRef = useRef<number>(0);
 
   // Keep callbacks and props in refs so the onResults closure always reads the latest version
   const onRepRef         = useRef(onRep);
@@ -323,82 +337,156 @@ export default function PoseCamera({ session, feedback, exerciseId = "bicep-curl
               }
             }
 
-            // ── Select landmarks by exercise ──────────────────────────────
-            const isSquat = exerciseIdRef.current === "squats";
+            // ── Identify exercise ─────────────────────────────────────
+            const exercise = exerciseIdRef.current;
+            const isSquat  = exercise === "squats";
+            const isPushup = exercise === "pushups";
+            // everything else (bicep-curls, shoulder-press, etc.) → curl branch
 
-            const ptA = landmarks[isSquat ? LANDMARKS.RIGHT_HIP   : LANDMARKS.RIGHT_SHOULDER];
-            const ptB = landmarks[isSquat ? LANDMARKS.RIGHT_KNEE  : LANDMARKS.RIGHT_ELBOW];
-            const ptC = landmarks[isSquat ? LANDMARKS.RIGHT_ANKLE : LANDMARKS.RIGHT_WRIST];
+            const MIN_VIS = 0.6;
+            /** Returns true when a landmark's visibility exceeds the threshold */
+            const vis = (lm: NormalizedLandmark | undefined) =>
+              (lm?.visibility ?? 0) >= MIN_VIS;
 
-            const MIN_VISIBILITY = 0.6;
-            const allVisible =
-              (ptA?.visibility ?? 0) >= MIN_VISIBILITY &&
-              (ptB?.visibility ?? 0) >= MIN_VISIBILITY &&
-              (ptC?.visibility ?? 0) >= MIN_VISIBILITY;
-
-            if (allVisible) {
-              const rawAngle = calculateAngle(ptA, ptB, ptC);
-
-              // ── Smooth angle via rolling average ──────────────────────────
-              const buf = angleBufferRef.current;
-              buf.push(rawAngle);
+            /** Push a raw angle into a rolling-average buffer and return the mean */
+            const smooth = (buf: number[], raw: number): number => {
+              buf.push(raw);
               if (buf.length > ANGLE_BUFFER_SIZE) buf.shift();
-              const angle = buf.reduce((s, v) => s + v, 0) / buf.length;
+              return buf.reduce((s, v) => s + v, 0) / buf.length;
+            };
 
-              // ── Rep detection (exercise-specific) ─────────────────────────
-              let repCounted = false;
-              if (isSquat) {
-                const { newStage, repCounted: counted } = detectSquatRep(angle, squatStageRef.current);
+            // nowMs is already declared above for ghost recording — reuse it
+            const phaseElapsedMs = nowMs - phaseStartTimeRef.current;
+
+            let repCounted = false;
+            let aiFb: AIFeedback = { text: "Keep Going", type: "warning" };
+
+            if (isSquat) {
+              // ── Bilateral squat: average both knee angles ──────────────────
+              //  Prevents one-sided lean from faking a full squat.
+              const lHip   = landmarks[LANDMARKS.LEFT_HIP];
+              const lKnee  = landmarks[LANDMARKS.LEFT_KNEE];
+              const lAnkle = landmarks[LANDMARKS.LEFT_ANKLE];
+              const rHip   = landmarks[LANDMARKS.RIGHT_HIP];
+              const rKnee  = landmarks[LANDMARKS.RIGHT_KNEE];
+              const rAnkle = landmarks[LANDMARKS.RIGHT_ANKLE];
+
+              if (
+                vis(lHip)   && vis(lKnee)  && vis(lAnkle) &&
+                vis(rHip)   && vis(rKnee)  && vis(rAnkle)
+              ) {
+                const leftAngle  = smooth(leftAngleBufferRef.current,  calculateAngle(lHip, lKnee, lAnkle));
+                const rightAngle = smooth(rightAngleBufferRef.current, calculateAngle(rHip, rKnee, rAnkle));
+
+                const { newStage, repCounted: counted } = detectDualSquatRep(
+                  leftAngle, rightAngle, squatStageRef.current, phaseElapsedMs
+                );
                 if (newStage !== squatStageRef.current) {
+                  // Stamp when we enter DOWN so stability timer measures depth duration
+                  if (newStage === "DOWN") phaseStartTimeRef.current = nowMs;
                   squatStageRef.current = newStage;
-                  const uiStage: Stage = newStage === "UP" ? "UP" : "DOWN";
-                  onStageChangeRef.current?.(uiStage);
+                  onStageChangeRef.current?.(newStage === "UP" ? "UP" : "DOWN");
                 }
                 repCounted = counted;
-              } else {
-                const { newStage, repCounted: counted } = detectCurlRep(angle, curlStageRef.current);
+                aiFb = getSquatFeedback((leftAngle + rightAngle) / 2, squatStageRef.current);
+
+                console.log(
+                  "SQUAT L:", Math.round(leftAngle), "R:", Math.round(rightAngle),
+                  "| STAGE:", squatStageRef.current, repCounted ? "| ✓ REP" : ""
+                );
+              }
+
+            } else if (isPushup) {
+              // ── Push-up: right elbow angle, full range required ────────────
+              //  DOWN = elbow ≤ 90° (chest near floor)
+              //  UP   = elbow ≥ 150° (arms extended)
+              //  500 ms minimum in DOWN prevents bounce reps.
+              const rSh = landmarks[LANDMARKS.RIGHT_SHOULDER];
+              const rEl = landmarks[LANDMARKS.RIGHT_ELBOW];
+              const rWr = landmarks[LANDMARKS.RIGHT_WRIST];
+
+              if (vis(rSh) && vis(rEl) && vis(rWr)) {
+                const elbowAngle = smooth(angleBufferRef.current, calculateAngle(rSh, rEl, rWr));
+
+                const { newStage, repCounted: counted } = detectPushupRep(
+                  elbowAngle, pushupStageRef.current, phaseElapsedMs
+                );
+                if (newStage !== pushupStageRef.current) {
+                  // Stamp when we enter DOWN so stability timer measures depth duration
+                  if (newStage === "DOWN") phaseStartTimeRef.current = nowMs;
+                  pushupStageRef.current = newStage;
+                  onStageChangeRef.current?.(newStage === "UP" ? "UP" : "DOWN");
+                }
+                repCounted = counted;
+                aiFb = getPushupFeedback(elbowAngle, pushupStageRef.current);
+
+                console.log(
+                  "PUSHUP elbow:", Math.round(elbowAngle),
+                  "| STAGE:", pushupStageRef.current, counted ? "| ✓ REP" : ""
+                );
+              }
+
+            } else {
+              // ── Bilateral bicep curl: BOTH arms must move together ─────────
+              //  Fixes the original single-arm flaw.  Rep only counts when:
+              //    • Both elbows reach the UP threshold (≤ 60°)
+              //    • Arms are in sync (diff < 20°)
+              //    • UP phase lasted ≥ 500 ms (no momentum bounces)
+              const lSh = landmarks[LANDMARKS.LEFT_SHOULDER];
+              const lEl = landmarks[LANDMARKS.LEFT_ELBOW];
+              const lWr = landmarks[LANDMARKS.LEFT_WRIST];
+              const rSh = landmarks[LANDMARKS.RIGHT_SHOULDER];
+              const rEl = landmarks[LANDMARKS.RIGHT_ELBOW];
+              const rWr = landmarks[LANDMARKS.RIGHT_WRIST];
+
+              if (
+                vis(lSh) && vis(lEl) && vis(lWr) &&
+                vis(rSh) && vis(rEl) && vis(rWr)
+              ) {
+                const leftAngle  = smooth(leftAngleBufferRef.current,  calculateAngle(lSh, lEl, lWr));
+                const rightAngle = smooth(rightAngleBufferRef.current, calculateAngle(rSh, rEl, rWr));
+
+                const { newStage, repCounted: counted } = detectDualCurlRep(
+                  leftAngle, rightAngle, curlStageRef.current, phaseElapsedMs
+                );
                 if (newStage !== curlStageRef.current) {
+                  // Stamp when we enter UP so stability timer measures hold duration
+                  if (newStage === "UP") phaseStartTimeRef.current = nowMs;
                   curlStageRef.current = newStage;
-                  const uiStage: Stage = newStage === "UP" ? "UP" : "DOWN";
-                  onStageChangeRef.current?.(uiStage);
+                  onStageChangeRef.current?.(newStage === "UP" ? "UP" : "DOWN");
                 }
                 repCounted = counted;
+                aiFb = getDualCurlFeedback(leftAngle, rightAngle, curlStageRef.current);
+
+                console.log(
+                  "CURL L:", Math.round(leftAngle), "R:", Math.round(rightAngle),
+                  "| STAGE:", curlStageRef.current, counted ? "| ✓ REP" : ""
+                );
               }
+            }
 
-              // Debug — logs angle + current stage every frame so you can
-              // verify thresholds in the browser console (DOWN > 150°, UP < 60°).
-              console.log(
-                "ANGLE:", Math.round(angle),
-                "| STAGE:", isSquat ? squatStageRef.current : curlStageRef.current,
-                repCounted ? "| ✓ REP" : ""
-              );
+            // ── Rep debounce ───────────────────────────────────────────────────
+            // Secondary guard on top of the phase-duration check — prevents
+            // two callbacks firing for the same rep due to frame timing jitter.
+            if (repCounted && nowMs - lastRepTimeRef.current >= REP_COOLDOWN_MS) {
+              lastRepTimeRef.current = nowMs;
+              onRepRef.current?.();
+            }
 
-              if (repCounted) {
-                const now = Date.now();
-                if (now - lastRepTimeRef.current >= REP_COOLDOWN_MS) {
-                  lastRepTimeRef.current = now;
-                  onRepRef.current?.();
-                }
+            // ── AI coaching feedback (consistency gate) ────────────────────────
+            // A candidate must hold steady for FEEDBACK_HOLD_MS before being
+            // committed — rapid flips reset the timer silently to stop UI flicker.
+            const pending = pendingFeedbackRef.current;
+            if (pending && pending.text === aiFb.text) {
+              if (
+                nowMs - pending.since >= FEEDBACK_HOLD_MS &&
+                committedFeedbackRef.current !== aiFb.text
+              ) {
+                committedFeedbackRef.current = aiFb.text;
+                onFeedbackRef.current?.(aiFb);
               }
-
-              // ── AI coaching feedback (consistency gate) ───────────────────
-              // A candidate must hold steady for FEEDBACK_HOLD_MS before
-              // being committed — rapid switches reset the timer silently.
-              const aiFb = isSquat
-                ? getSquatFeedback(angle, squatStageRef.current)
-                : getAIFeedback(angle, curlStageRef.current);
-              const now = Date.now();
-              const pending = pendingFeedbackRef.current;
-
-              if (pending && pending.text === aiFb.text) {
-                if (now - pending.since >= FEEDBACK_HOLD_MS &&
-                    committedFeedbackRef.current !== aiFb.text) {
-                  committedFeedbackRef.current = aiFb.text;
-                  onFeedbackRef.current?.(aiFb);
-                }
-              } else {
-                pendingFeedbackRef.current = { ...aiFb, since: now };
-              }
+            } else {
+              pendingFeedbackRef.current = { ...aiFb, since: nowMs };
             }
           } else {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -443,10 +531,14 @@ export default function PoseCamera({ session, feedback, exerciseId = "bicep-curl
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    // Reset curl stage, angle buffer and clear canvas when stopping
-    curlStageRef.current  = "DOWN";
-    squatStageRef.current = "UP";
-    angleBufferRef.current = [];
+    // Reset all stage refs, angle buffers and timers when stopping
+    curlStageRef.current   = "DOWN";
+    squatStageRef.current  = "UP";
+    pushupStageRef.current = "UP";
+    angleBufferRef.current      = [];
+    leftAngleBufferRef.current  = [];
+    rightAngleBufferRef.current = [];
+    phaseStartTimeRef.current   = 0;
     lastRepTimeRef.current = 0;
     pendingFeedbackRef.current = null;
     committedFeedbackRef.current = "";

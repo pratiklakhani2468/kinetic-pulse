@@ -241,9 +241,9 @@ export default function WorkoutPageClient() {
           {/* ── LEFT: Camera + Metrics ──────────────────────────────────────── */}
           <div className="lg:col-span-2 flex flex-col gap-4">
 
-            {/* Camera */}
+            {/* Camera — parent must be flex so PoseCamera's flex-1 fills the height */}
             <div className="bg-card border border-border/40 rounded-xl overflow-hidden flex-1">
-              <div className="relative w-full h-[60vh] min-h-[420px] overflow-hidden">
+              <div className="relative flex w-full h-[60vh] min-h-[420px] overflow-hidden">
                 <PoseCamera
                   session={session}
                   feedback={feedback}

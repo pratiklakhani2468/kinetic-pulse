@@ -179,3 +179,175 @@ export function detectSquatRep(angle: number, currentStage: SquatStage): SquatRe
   // In-between → no state change
   return { newStage: currentStage, repCounted: false };
 }
+
+// ─── Dual-arm bicep curl detection ───────────────────────────────────────────
+//
+//  Fixes the single-arm flaw by requiring BOTH elbows to cross thresholds
+//  simultaneously.  Arms must also stay within CURL_SYNC_TOLERANCE of each
+//  other to reject one-sided cheating or camera noise.
+//
+//  State machine:
+//    DOWN → UP   when BOTH angles ≤ UP threshold AND arms are in sync
+//    UP   → DOWN when BOTH angles ≥ DOWN threshold AND UP phase lasted ≥ 500 ms
+//
+//  The 500 ms minimum in the UP phase prevents bounced / momentum reps from
+//  being counted (stability check).
+
+export const CURL_SYNC_TOLERANCE = 20; // degrees — max allowed gap between arms
+
+export function detectDualCurlRep(
+  leftAngle:      number,
+  rightAngle:     number,
+  currentStage:   CurlStage,
+  phaseElapsedMs: number,   // ms spent in the current UP phase
+): RepResult {
+  const inSync = Math.abs(leftAngle - rightAngle) < CURL_SYNC_TOLERANCE;
+
+  // Both arms curled high enough AND moving together → enter UP (no rep yet)
+  if (
+    leftAngle  <= CURL_THRESHOLDS.UP &&
+    rightAngle <= CURL_THRESHOLDS.UP &&
+    inSync &&
+    currentStage === "DOWN"
+  ) {
+    return { newStage: "UP", repCounted: false };
+  }
+
+  // Both arms fully extended after being curled AND held UP for ≥ 500 ms → rep!
+  if (
+    leftAngle  >= CURL_THRESHOLDS.DOWN &&
+    rightAngle >= CURL_THRESHOLDS.DOWN &&
+    currentStage === "UP" &&
+    phaseElapsedMs >= 500
+  ) {
+    return { newStage: "DOWN", repCounted: true };
+  }
+
+  return { newStage: currentStage, repCounted: false };
+}
+
+// ─── Dual-arm curl feedback ───────────────────────────────────────────────────
+
+export function getDualCurlFeedback(
+  leftAngle:  number,
+  rightAngle: number,
+  stage:      CurlStage,
+): AIFeedback {
+  const angleDiff = Math.abs(leftAngle - rightAngle);
+  const avgAngle  = (leftAngle + rightAngle) / 2;
+
+  // Sync issue takes priority — report it before anything else
+  if (angleDiff >= CURL_SYNC_TOLERANCE) {
+    return { text: "Keep Both Arms Even", type: "warning" };
+  }
+
+  if (avgAngle <= CURL_THRESHOLDS.UP) {
+    return { text: "Good Rep!", type: "success" };
+  }
+
+  if (stage === "UP") {
+    return { text: "Lower Slowly", type: "warning" };
+  }
+
+  if (avgAngle > CURL_THRESHOLDS.DOWN && stage === "DOWN") {
+    return { text: "Fully Extend Both Arms", type: "warning" };
+  }
+
+  if (stage === "DOWN" && avgAngle > 70 && avgAngle < CURL_THRESHOLDS.DOWN) {
+    return { text: "Curl Higher", type: "warning" };
+  }
+
+  return { text: "Keep Going", type: "warning" };
+}
+
+// ─── Push-up detection ────────────────────────────────────────────────────────
+//
+//  State machine (right elbow angle — camera faces user from front):
+//    UP   → DOWN  when elbowAngle ≤ 90°  (chest near floor)
+//    DOWN → UP    when elbowAngle ≥ 150° AND DOWN phase lasted ≥ 500 ms
+//
+//  The 500 ms minimum in the DOWN phase prevents partial-dip reps.
+
+export const PUSHUP_THRESHOLDS = {
+  DOWN: 90,   // elbow angle ≤ this → chest near floor → DOWN
+  UP:  150,   // elbow angle ≥ this → arms extended    → UP
+} as const;
+
+export type PushupStage = "UP" | "DOWN" | "IDLE";
+
+export interface PushupRepResult {
+  newStage:   PushupStage;
+  repCounted: boolean;
+}
+
+export function detectPushupRep(
+  elbowAngle:     number,
+  currentStage:   PushupStage,
+  phaseElapsedMs: number,   // ms spent in the current DOWN phase
+): PushupRepResult {
+  // Arms bent to full depth → DOWN
+  if (elbowAngle <= PUSHUP_THRESHOLDS.DOWN && currentStage !== "DOWN") {
+    return { newStage: "DOWN", repCounted: false };
+  }
+
+  // Arms fully extended after being bent AND held low for ≥ 500 ms → rep!
+  if (
+    elbowAngle >= PUSHUP_THRESHOLDS.UP &&
+    currentStage === "DOWN" &&
+    phaseElapsedMs >= 500
+  ) {
+    return { newStage: "UP", repCounted: true };
+  }
+
+  return { newStage: currentStage, repCounted: false };
+}
+
+export function getPushupFeedback(elbowAngle: number, stage: PushupStage): AIFeedback {
+  if (elbowAngle <= PUSHUP_THRESHOLDS.DOWN) {
+    return { text: "Good Depth!", type: "success" };
+  }
+  if (stage === "DOWN" && elbowAngle < PUSHUP_THRESHOLDS.UP) {
+    return { text: "Push All The Way Up", type: "warning" };
+  }
+  if (stage === "UP" && elbowAngle < 120) {
+    return { text: "Go Lower", type: "warning" };
+  }
+  return { text: "Keep Going", type: "warning" };
+}
+
+// ─── Bilateral squat detection ────────────────────────────────────────────────
+//
+//  Improvement over detectSquatRep:
+//    1. Averages LEFT and RIGHT knee angles — one-sided lean can't fake a rep
+//    2. Checks knee symmetry (diff < 25°) — flags imbalanced squats
+//    3. Requires ≥ 500 ms in DOWN phase — prevents bounce reps
+//
+//  State machine:
+//    UP   → DOWN  when avgAngle ≤ SQUAT DOWN threshold AND knees balanced
+//    DOWN → UP    when avgAngle ≥ SQUAT UP threshold   AND DOWN lasted ≥ 500 ms
+
+export function detectDualSquatRep(
+  leftAngle:      number,
+  rightAngle:     number,
+  currentStage:   SquatStage,
+  phaseElapsedMs: number,   // ms spent in the current DOWN phase
+): SquatRepResult {
+  const avgAngle = (leftAngle + rightAngle) / 2;
+  const balanced = Math.abs(leftAngle - rightAngle) < 25;
+
+  // Both knees deeply bent AND tracking evenly → DOWN
+  if (avgAngle <= SQUAT_THRESHOLDS.DOWN && balanced && currentStage !== "DOWN") {
+    return { newStage: "DOWN", repCounted: false };
+  }
+
+  // Standing back up after full squat AND held depth for ≥ 500 ms → rep!
+  if (
+    avgAngle >= SQUAT_THRESHOLDS.UP &&
+    currentStage === "DOWN" &&
+    phaseElapsedMs >= 500
+  ) {
+    return { newStage: "UP", repCounted: true };
+  }
+
+  return { newStage: currentStage, repCounted: false };
+}
