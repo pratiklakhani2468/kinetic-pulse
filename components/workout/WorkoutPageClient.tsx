@@ -27,6 +27,23 @@ import { loadGhost } from "@/lib/ghostMode";
 
 const EXERCISE_NAMES = EXERCISE_LIBRARY.map((e) => e.name);
 
+// Feedback messages that represent genuine form problems worth reporting to Gemini
+const FORM_ISSUE_SIGNALS = new Set([
+  "Control Your Movement",
+  "Keep Both Arms Even",
+  "Curl Higher",
+  "Balance Your Weight",
+  "Go a Little Lower",
+  "Go Lower",
+  "Lock Out Your Arms",
+]);
+
+// Subset that specifically indicates bilateral asymmetry
+const IMBALANCE_SIGNALS = new Set([
+  "Keep Both Arms Even",
+  "Balance Your Weight",
+]);
+
 const TARGET_REPS = 15;
 
 const DOWN_FEEDBACK: Feedback[] = [
@@ -73,6 +90,11 @@ export default function WorkoutPageClient() {
   const sessionStartRef   = useRef<number | null>(null);
   const savedThisSession  = useRef(false);
   const timerRef          = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Issue frequency map — counts how often each form-problem message fires.
+  // Reset on session reset.  Top 3 are sent to Gemini at session end.
+  const issueFrqRef  = useRef<Map<string, number>>(new Map());
+  const imbalanceRef = useRef(false);
 
   // exerciseIndexRef kept in sync via effect (changes are infrequent)
   useEffect(() => { exerciseIndexRef.current = exerciseIndex; }, [exerciseIndex]);
@@ -154,6 +176,9 @@ export default function WorkoutPageClient() {
     repsRef.current         = 0;
     sessionRef.current      = "idle";
     sessionStartRef.current = null;
+    // Clear issue tracking for the new session
+    issueFrqRef.current.clear();
+    imbalanceRef.current = false;
     setReps(0);
     setSession("idle");
     setStage("UP");
@@ -174,11 +199,19 @@ export default function WorkoutPageClient() {
     sessionRef.current = "paused";
     setSession("paused");
 
+    // Derive the 3 most-frequent form issues to send to the AI coach
+    const topIssues = [...issueFrqRef.current.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([text]) => text);
+
     setSummary({
       exercise:     EXERCISE_LIBRARY[currentIdx].name,
       reps:         currentReps,
       duration,
       formAccuracy: formAccuracyRef.current,
+      issues:       topIssues,
+      imbalance:    imbalanceRef.current,
     });
   }, [persistSession]);
 
@@ -205,6 +238,18 @@ export default function WorkoutPageClient() {
 
   const handlePoseFeedback = useCallback((fb: AIFeedback) => {
     setFeedback({ text: fb.text, type: fb.type });
+
+    // Count form-problem signals for the end-of-session AI report.
+    // Only warnings in the FORM_ISSUE_SIGNALS set are meaningful problems.
+    if (fb.type === "warning" && FORM_ISSUE_SIGNALS.has(fb.text)) {
+      issueFrqRef.current.set(
+        fb.text,
+        (issueFrqRef.current.get(fb.text) ?? 0) + 1,
+      );
+      if (IMBALANCE_SIGNALS.has(fb.text)) {
+        imbalanceRef.current = true;
+      }
+    }
   }, []);
 
   // ── Derived values ────────────────────────────────────────────────────────

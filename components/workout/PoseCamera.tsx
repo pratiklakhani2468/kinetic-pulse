@@ -13,6 +13,7 @@ import {
   detectPushupRep,
   getAIFeedback,
   getSquatFeedback,
+  getSquatFeedbackBilateral,
   getDualCurlFeedback,
   getPushupFeedback,
   LANDMARKS,
@@ -192,6 +193,11 @@ export default function PoseCamera({ session, feedback, exerciseId = "bicep-curl
 
   // Phase-start timestamp — used for the ≥ 500 ms stability check
   const phaseStartTimeRef = useRef<number>(0);
+
+  // Previous-frame smoothed angles — used to compute per-frame velocity
+  // (null = no previous frame yet, so velocity defaults to 0)
+  const prevLeftAngleRef  = useRef<number | null>(null);
+  const prevRightAngleRef = useRef<number | null>(null);
 
   // Keep callbacks and props in refs so the onResults closure always reads the latest version
   const onRepRef         = useRef(onRep);
@@ -388,7 +394,7 @@ export default function PoseCamera({ session, feedback, exerciseId = "bicep-curl
                   onStageChangeRef.current?.(newStage === "UP" ? "UP" : "DOWN");
                 }
                 repCounted = counted;
-                aiFb = getSquatFeedback((leftAngle + rightAngle) / 2, squatStageRef.current);
+                aiFb = getSquatFeedbackBilateral(leftAngle, rightAngle, squatStageRef.current);
 
                 console.log(
                   "SQUAT L:", Math.round(leftAngle), "R:", Math.round(rightAngle),
@@ -446,6 +452,16 @@ export default function PoseCamera({ session, feedback, exerciseId = "bicep-curl
                 const leftAngle  = smooth(leftAngleBufferRef.current,  calculateAngle(lSh, lEl, lWr));
                 const rightAngle = smooth(rightAngleBufferRef.current, calculateAngle(rSh, rEl, rWr));
 
+                // Per-frame velocity: avg of both arms' smoothed angle delta
+                // Detects swinging / momentum cheating before the state machine sees it
+                const curlVelocity =
+                  prevLeftAngleRef.current !== null && prevRightAngleRef.current !== null
+                    ? (Math.abs(leftAngle  - prevLeftAngleRef.current) +
+                       Math.abs(rightAngle - prevRightAngleRef.current)) / 2
+                    : 0;
+                prevLeftAngleRef.current  = leftAngle;
+                prevRightAngleRef.current = rightAngle;
+
                 const { newStage, repCounted: counted } = detectDualCurlRep(
                   leftAngle, rightAngle, curlStageRef.current, phaseElapsedMs
                 );
@@ -456,7 +472,7 @@ export default function PoseCamera({ session, feedback, exerciseId = "bicep-curl
                   onStageChangeRef.current?.(newStage === "UP" ? "UP" : "DOWN");
                 }
                 repCounted = counted;
-                aiFb = getDualCurlFeedback(leftAngle, rightAngle, curlStageRef.current);
+                aiFb = getDualCurlFeedback(leftAngle, rightAngle, curlStageRef.current, curlVelocity);
 
                 console.log(
                   "CURL L:", Math.round(leftAngle), "R:", Math.round(rightAngle),
@@ -539,6 +555,8 @@ export default function PoseCamera({ session, feedback, exerciseId = "bicep-curl
     leftAngleBufferRef.current  = [];
     rightAngleBufferRef.current = [];
     phaseStartTimeRef.current   = 0;
+    prevLeftAngleRef.current    = null;
+    prevRightAngleRef.current   = null;
     lastRepTimeRef.current = 0;
     pendingFeedbackRef.current = null;
     committedFeedbackRef.current = "";

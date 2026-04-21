@@ -1,15 +1,21 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle, Clock, Repeat2, Target, LayoutDashboard } from "lucide-react";
+import { CheckCircle, Clock, Repeat2, Target, LayoutDashboard, Sparkles } from "lucide-react";
+import { generateWorkoutFeedback } from "@/lib/geminiCoach";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface SummaryData {
   exercise:     string;
   reps:         number;
-  duration:     number; // seconds
-  formAccuracy: number; // 0–100, 0 = not available
+  duration:     number;   // seconds
+  formAccuracy: number;   // 0–100, 0 = not available
+  /** Top form-issue messages collected during the session */
+  issues?:      string[];
+  /** Whether bilateral imbalance was flagged */
+  imbalance?:   boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -25,22 +31,37 @@ function formatDuration(seconds: number): string {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 interface Props {
-  data: SummaryData;
+  data:    SummaryData;
   onClose: () => void;
 }
 
 export default function WorkoutSummaryModal({ data, onClose }: Props) {
   const router = useRouter();
 
-  function handleDashboard() {
-    onClose();
-    router.push("/dashboard");
-  }
+  // ── AI Coach state ────────────────────────────────────────────────────────
+  // generateWorkoutFeedback always resolves (catches errors internally + returns
+  // a fallback string), so we only need loading + result — no separate error state.
+  const [aiFeedback, setAiFeedback] = useState<string | null>(null);
+  const [aiLoading,  setAiLoading]  = useState(true);
 
-  function handleHistory() {
-    onClose();
-    router.push("/analytics");
-  }
+  // Fetch once on mount — data is stable for the lifetime of the modal
+  useEffect(() => {
+    generateWorkoutFeedback({
+      exercise:  data.exercise,
+      reps:      data.reps,
+      duration:  data.duration,
+      accuracy:  data.formAccuracy,
+      issues:    data.issues   ?? [],
+      imbalance: data.imbalance ?? false,
+    })
+      .then((text) => setAiFeedback(text))
+      .finally(()  => setAiLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally run once
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+  function handleDashboard() { onClose(); router.push("/dashboard"); }
+  function handleHistory()   { onClose(); router.push("/analytics"); }
 
   return (
     /* Backdrop */
@@ -54,7 +75,7 @@ export default function WorkoutSummaryModal({ data, onClose }: Props) {
         {/* Top accent bar */}
         <div className="h-1 bg-primary" />
 
-        <div className="p-7 flex flex-col items-center text-center gap-6">
+        <div className="p-7 flex flex-col items-center text-center gap-5">
 
           {/* Badge */}
           <div className="flex flex-col items-center gap-2">
@@ -102,18 +123,48 @@ export default function WorkoutSummaryModal({ data, onClose }: Props) {
               <p className="text-[#4b5563] text-[9px] tracking-widest uppercase">Reps / min</p>
             </div>
 
-            {/* Divider */}
-            {data.formAccuracy > 0 && <div className="h-10 w-px bg-[#222]" />}
-
             {/* Form accuracy (optional) */}
             {data.formAccuracy > 0 && (
-              <div className="flex flex-col items-center gap-1">
-                <div className="w-8 h-8 rounded-xl bg-[#1e1e1e] flex items-center justify-center">
-                  <Target size={14} className="text-[#ff7043]" />
+              <>
+                <div className="h-10 w-px bg-[#222]" />
+                <div className="flex flex-col items-center gap-1">
+                  <div className="w-8 h-8 rounded-xl bg-[#1e1e1e] flex items-center justify-center">
+                    <Target size={14} className="text-[#ff7043]" />
+                  </div>
+                  <p className="text-white font-bold text-sm">{data.formAccuracy}%</p>
+                  <p className="text-[#4b5563] text-[9px] tracking-widest uppercase">Accuracy</p>
                 </div>
-                <p className="text-white font-bold text-sm">{data.formAccuracy}%</p>
-                <p className="text-[#4b5563] text-[9px] tracking-widest uppercase">Accuracy</p>
+              </>
+            )}
+          </div>
+
+          {/* ── AI Coach feedback ──────────────────────────────────────────── */}
+          <div className="w-full bg-[#0f0f0f] border border-[#222] rounded-2xl p-4 text-left">
+
+            {/* Header */}
+            <div className="flex items-center gap-1.5 mb-3">
+              <Sparkles size={11} className="text-[#9b6dfa]" />
+              <p className="text-[#9b6dfa] text-[9px] font-bold tracking-[0.25em] uppercase">
+                AI Coach
+              </p>
+            </div>
+
+            {/* Content */}
+            {aiLoading ? (
+              // Loading — skeleton bars + status text
+              <div className="space-y-2">
+                <p className="text-[#4b5563] text-[10px] tracking-wide mb-2">
+                  Generating AI feedback…
+                </p>
+                <div className="h-2.5 bg-[#1e1e1e] rounded-full animate-pulse w-full" />
+                <div className="h-2.5 bg-[#1e1e1e] rounded-full animate-pulse w-[82%]" />
+                <div className="h-2.5 bg-[#1e1e1e] rounded-full animate-pulse w-[60%]" />
               </div>
+            ) : (
+              // Result — either AI coaching text or the graceful fallback string
+              <p className="text-[#d1d5db] text-sm leading-relaxed">
+                {aiFeedback}
+              </p>
             )}
           </div>
 
@@ -133,6 +184,7 @@ export default function WorkoutSummaryModal({ data, onClose }: Props) {
               View History
             </button>
           </div>
+
         </div>
       </div>
     </div>

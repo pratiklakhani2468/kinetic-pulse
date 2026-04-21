@@ -227,34 +227,59 @@ export function detectDualCurlRep(
 }
 
 // ─── Dual-arm curl feedback ───────────────────────────────────────────────────
+//
+//  Priority order:
+//    1. Jitter / momentum (too-fast movement) — catches swinging & bouncing
+//    2. Sync mismatch    — one arm lagging more than CURL_SYNC_TOLERANCE
+//    3. Peak curl        — both arms at full contraction → success
+//    4. Eccentric phase  — arms lowering back down from UP
+//    5. Bottom — not yet at full extension
+//    6. Mid-curl (tiered) — guides user to go higher
+//
+//  `angleVelocity` is the smoothed per-frame angle change (°/frame) averaged
+//  across both arms.  Pass 0 (default) when not tracked.
+
+export const JITTER_THRESHOLD = 8; // °/frame — above this = momentum / swing
 
 export function getDualCurlFeedback(
-  leftAngle:  number,
-  rightAngle: number,
-  stage:      CurlStage,
+  leftAngle:     number,
+  rightAngle:    number,
+  stage:         CurlStage,
+  angleVelocity = 0,
 ): AIFeedback {
   const angleDiff = Math.abs(leftAngle - rightAngle);
   const avgAngle  = (leftAngle + rightAngle) / 2;
 
-  // Sync issue takes priority — report it before anything else
+  // 1. Jitter / swinging — catches momentum reps and elbow flares
+  if (angleVelocity > JITTER_THRESHOLD) {
+    return { text: "Control Your Movement", type: "warning" };
+  }
+
+  // 2. Arms out of sync — one side doing more work
   if (angleDiff >= CURL_SYNC_TOLERANCE) {
     return { text: "Keep Both Arms Even", type: "warning" };
   }
 
+  // 3. Peak of curl — full contraction reached
   if (avgAngle <= CURL_THRESHOLDS.UP) {
     return { text: "Good Rep!", type: "success" };
   }
 
+  // 4. Eccentric (lowering) phase — cue slow, controlled descent
   if (stage === "UP") {
     return { text: "Lower Slowly", type: "warning" };
   }
 
+  // 5. At full extension — ready to start next rep
   if (avgAngle > CURL_THRESHOLDS.DOWN && stage === "DOWN") {
     return { text: "Fully Extend Both Arms", type: "warning" };
   }
 
-  if (stage === "DOWN" && avgAngle > 70 && avgAngle < CURL_THRESHOLDS.DOWN) {
-    return { text: "Curl Higher", type: "warning" };
+  // 6. Mid-curl (stage DOWN, concentric phase) — tiered depth guidance
+  if (stage === "DOWN") {
+    if (avgAngle > 120) return { text: "Start Curling",  type: "warning" };
+    if (avgAngle > 70)  return { text: "Curl Higher",    type: "warning" };
+    return                     { text: "Almost There!",  type: "success" }; // 60–70°, near peak
   }
 
   return { text: "Keep Going", type: "warning" };
@@ -302,16 +327,40 @@ export function detectPushupRep(
   return { newStage: currentStage, repCounted: false };
 }
 
+// Push-up feedback tiers (elbowAngle is the right-arm angle, 0–180°):
+//
+//   ≤ 90°          → full depth           → "Good Depth!"
+//   90–120°        → near but not there   → "Go a Little Lower"
+//   > 90°, DOWN    → ascending            → "Push All The Way Up"
+//   UP, < 140°     → elbows not locked    → "Lock Out Your Arms"
+//   UP, ≥ 140°     → fully extended       → "Lower With Control"
+
 export function getPushupFeedback(elbowAngle: number, stage: PushupStage): AIFeedback {
+  // 1. Full depth — chest near floor
   if (elbowAngle <= PUSHUP_THRESHOLDS.DOWN) {
     return { text: "Good Depth!", type: "success" };
   }
+
+  // 2. Near depth but not quite — incomplete rep (90–120°)
+  if (elbowAngle <= 120 && stage !== "UP") {
+    return { text: "Go a Little Lower", type: "warning" };
+  }
+
+  // 3. Ascending after reaching depth — push to full lockout
   if (stage === "DOWN" && elbowAngle < PUSHUP_THRESHOLDS.UP) {
     return { text: "Push All The Way Up", type: "warning" };
   }
-  if (stage === "UP" && elbowAngle < 120) {
-    return { text: "Go Lower", type: "warning" };
+
+  // 4. At top but elbows still soft — full extension required
+  if (stage === "UP" && elbowAngle < 140) {
+    return { text: "Lock Out Your Arms", type: "warning" };
   }
+
+  // 5. Fully extended at top — cue controlled descent into next rep
+  if (stage === "UP") {
+    return { text: "Lower With Control", type: "warning" };
+  }
+
   return { text: "Keep Going", type: "warning" };
 }
 
@@ -325,6 +374,50 @@ export function getPushupFeedback(elbowAngle: number, stage: PushupStage): AIFee
 //  State machine:
 //    UP   → DOWN  when avgAngle ≤ SQUAT DOWN threshold AND knees balanced
 //    DOWN → UP    when avgAngle ≥ SQUAT UP threshold   AND DOWN lasted ≥ 500 ms
+
+// ─── Bilateral squat feedback ─────────────────────────────────────────────────
+//
+//  Takes individual left/right knee angles so it can detect imbalance
+//  independently of the depth check.
+//
+//  Priority order:
+//    1. Imbalance (diff > 25°)           → "Balance Your Weight"
+//    2. Full depth reached (avg < 90°)   → "Good Depth!"
+//    3. Near depth (avg 90–110°, going ↓)→ "Go a Little Lower"
+//    4. Shallow descent (avg 110–140°)   → "Go Lower"
+//    5. Rising out of squat (stage DOWN) → "Drive Through Your Heels"
+//    6. Standing, initiate squat         → "Squat Down"
+
+export function getSquatFeedbackBilateral(
+  leftAngle:  number,
+  rightAngle: number,
+  stage:      SquatStage,
+): AIFeedback {
+  const avgAngle = (leftAngle + rightAngle) / 2;
+  const diff     = Math.abs(leftAngle - rightAngle);
+
+  // 1. Weight imbalance — one knee tracking differently from the other
+  if (diff > 25) {
+    return { text: "Balance Your Weight", type: "warning" };
+  }
+
+  // 2. At or past full depth
+  if (avgAngle < SQUAT_THRESHOLDS.DOWN) {
+    return { text: "Good Depth!", type: "success" };
+  }
+
+  // 3. Rising after depth (stage flipped to DOWN) — cue drive phase
+  if (stage === "DOWN") {
+    return { text: "Drive Through Your Heels", type: "warning" };
+  }
+
+  // 4. Descending but not deep enough — tiered guidance (stage is still UP)
+  if (avgAngle < 110) return { text: "Go a Little Lower", type: "warning" };
+  if (avgAngle < 140) return { text: "Go Lower",          type: "warning" };
+
+  // 5. Standing — cue user to begin descent
+  return { text: "Squat Down", type: "warning" };
+}
 
 export function detectDualSquatRep(
   leftAngle:      number,
